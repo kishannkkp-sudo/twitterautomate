@@ -1,5 +1,5 @@
-# main.py - Updated for X.com: Post ALL Today's Jobs (Stateful)
-import sys
+# main.py - X.com (Twitter) Job Poster (Stateful, ALL Today, IST Safe)
+
 import time
 import requests
 import re
@@ -8,17 +8,21 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import io
-import tempfile
 import os
-from datetime import datetime, date
+from datetime import datetime
 from dotenv import load_dotenv
+import pytz
+
 from x_posters import post_to_x
 
 load_dotenv()
 
-# Blogger JSON Feed
+# ========================================
+# CONFIG
+# ========================================
 BLOG_FEED_URL = 'https://www.firstjobtech.in/feeds/posts/default?alt=json'
 POSTED_JOBS_FILE = 'posted_jobs.txt'
+IST = pytz.timezone("Asia/Kolkata")
 
 # ========================================
 # Helper: Track posted jobs
@@ -34,21 +38,20 @@ def save_posted_job(job_id):
         f.write(f"{job_id}\n")
 
 # ========================================
-# Helper: Check if job is from today
+# Helper: Check if Blogger post is TODAY (IST)
 # ========================================
 def is_today(date_str):
     try:
-        if 'T' in date_str:
-            date_part = date_str.split('T')[0]
-            job_date = datetime.strptime(date_part, '%Y-%m-%d').date()
-            return job_date == date.today()
-        return False
+        # Example: 2026-02-03T23:55:53.238-08:00
+        dt = datetime.fromisoformat(date_str)
+        dt_ist = dt.astimezone(IST)
+        return dt_ist.date() == datetime.now(IST).date()
     except Exception as e:
-        print(f"Date parsing error: {e}")
+        print(f"Date parsing error: {date_str} -> {e}")
         return False
 
 # ========================================
-# Helper: Extract Logo & Company
+# Helper: Extract Company & Logo
 # ========================================
 def extract_job_metadata(entry):
     title_text = entry.get('title', {}).get('$t', '')
@@ -59,10 +62,15 @@ def extract_job_metadata(entry):
         parts = title_text.split(" - ")
         if len(parts) > 1:
             raw_company = parts[1]
-            clean_company = re.sub(r'(Recruitment|Hiring|Off Campus|Job|Careers).*', '', raw_company, flags=re.IGNORECASE).strip()
+            clean_company = re.sub(
+                r'(Recruitment|Hiring|Off Campus|Job|Careers).*',
+                '',
+                raw_company,
+                flags=re.IGNORECASE
+            ).strip()
             if clean_company:
                 company_name = clean_company
-    
+
     logo_url = None
     img_match = re.search(r'<img[^>]+src="([^">]+)"', content_html)
     if img_match:
@@ -71,62 +79,14 @@ def extract_job_metadata(entry):
     return company_name, logo_url
 
 # ========================================
-# Image: Create job poster
-# ========================================
-def create_job_image(job, image_path):
-    fig, ax = plt.subplots(figsize=(8, 6))
-    fig.patch.set_facecolor('white')
-    ax.set_xlim(0, 8)
-    ax.set_ylim(0, 6)
-    ax.axis('off')
-
-    title = job.get('title', '')
-    company = job.get('company_name', 'Company')
-
-    from textwrap import fill
-    wrapped_title = fill(title, width=30)
-    
-    ax.text(4, 5.2, wrapped_title, ha='center', va='center', fontsize=14, fontweight='bold', color='#1a1a1a', wrap=True)
-    ax.text(4, 4.5, f"at {company}", ha='center', va='center', fontsize=12, color='#555555', wrap=True)
-
-    # Logo rendering restored just in case, but unused in text-only mode
-    logo_url = job.get('company_logo')
-    if logo_url:
-        try:
-            resp = requests.get(logo_url, timeout=10)
-            if resp.status_code == 200:
-                image_data = io.BytesIO(resp.content)
-                img = mpimg.imread(image_data, format='jpg')
-                h, w = img.shape[:2]
-                max_dim = 2.5
-                scale = max_dim / max(w, h)
-                new_w, new_h = w * scale * (8/600), h * scale * (6/600)
-                aspect = w / h
-                disp_h = 2.0
-                disp_w = disp_h * aspect
-                if disp_w > 5:
-                    disp_w = 5
-                    disp_h = disp_w / aspect
-                ax.imshow(img, extent=[4 - disp_w/2, 4 + disp_w/2, 2.5 - disp_h/2, 2.5 + disp_h/2], zorder=2)
-        except Exception as e:
-            print(f"Logo display failed: {e}")
-
-    ax.text(4, 0.9, "New Opportunity! Apply Now", ha='center', va='center', fontsize=11, style='italic', color='#1a1a1a')
-    ax.text(4, 0.5, "www.firstjobtech.in", ha='center', va='center', fontsize=10, color='#0066cc', style='italic')
-
-    plt.savefig(image_path, bbox_inches='tight', pad_inches=0.3, dpi=150, facecolor='white')
-    plt.close(fig)
-    print(f"Image created: {image_path}")
-
-# ========================================
-# Caption: Format X post
+# Caption Formatter (280 char safe)
 # ========================================
 def format_caption(job):
     title = job['title']
     company = job['company_name']
     url = job['url']
-    
-    hashtags = f"#JobOpening #Hiring #Careers #{company.replace(' ', '')} #OffCampus".replace('##', '#')
+
+    hashtags = f"#Hiring #Jobs #{company.replace(' ', '')} #Careers #OffCampus"
 
     caption = (
         f"🚀 New Job Alert: {title}\n\n"
@@ -134,57 +94,58 @@ def format_caption(job):
         f"🔗 Apply: {url}\n\n"
         f"{hashtags}"
     )
+
+    # X.com hard limit
     if len(caption) > 280:
         caption = caption[:277] + "..."
+
     return caption
 
 # ========================================
-# Fetch: ALL TODAY'S JOBS
+# Fetch ALL TODAY jobs (IST)
 # ========================================
 def fetch_today_jobs():
     try:
         print(f"Fetching from: {BLOG_FEED_URL}")
-        # Fetching ALL jobs from Today (Stateful check later)
         response = requests.get(BLOG_FEED_URL, timeout=15)
+
         if response.status_code != 200:
             print(f"Blogger API error: {response.status_code}")
             return []
-        
+
         data = response.json()
         entries = data.get('feed', {}).get('entry', [])
-        
+
         today_jobs = []
-        
+
         for entry in entries:
-            raw_id = entry.get('id', {}).get('$t', '')
-            job_id = raw_id.split('-')[-1] 
-            
             published = entry.get('published', {}).get('$t', '')
-            
-            # Check if it was published TODAY
-            if is_today(published):
-                title = entry.get('title', {}).get('$t', 'Job Opening')
-                
-                link_url = ""
-                for link in entry.get('link', []):
-                    if link.get('rel') == 'alternate':
-                        link_url = link.get('href')
-                        break
-                
-                company_name, logo_url = extract_job_metadata(entry)
-                
-                job_obj = {
-                    'id': job_id,
-                    'title': title,
-                    'company_name': company_name,
-                    'company_logo': logo_url,
-                    'url': link_url,
-                    'published': published
-                }
-                
-                today_jobs.append(job_obj)
-                
-        print(f"Found {len(today_jobs)} jobs published TODAY.")
+            if not is_today(published):
+                continue
+
+            raw_id = entry.get('id', {}).get('$t', '')
+            job_id = raw_id.split('-')[-1]
+
+            title = entry.get('title', {}).get('$t', 'Job Opening')
+            link_url = next(
+                (l.get('href') for l in entry.get('link', []) if l.get('rel') == 'alternate'),
+                ""
+            )
+
+            company_name, logo_url = extract_job_metadata(entry)
+
+            today_jobs.append({
+                'id': job_id,
+                'title': title,
+                'company_name': company_name,
+                'company_logo': logo_url,
+                'url': link_url,
+                'published': published
+            })
+
+            print(f"✓ Today job found: {title}")
+
+        print(f"Total jobs TODAY (IST): {len(today_jobs)}")
         return today_jobs
 
     except Exception as e:
@@ -192,10 +153,11 @@ def fetch_today_jobs():
         return []
 
 # ========================================
-# Main: Post with delay & deduplication
+# MAIN
 # ========================================
 def main():
-    print("AI X.com (Twitter) Job Poster (Stateful - All Today - TEXT ONLY)")
+    print("AI X.com (Twitter) Job Poster")
+    print("Stateful | All Today's Jobs | Text Only | IST Safe")
     print("=" * 60)
 
     if not os.getenv('TWITTER_API_KEY'):
@@ -209,44 +171,28 @@ def main():
         print("No jobs found for today.")
         return
 
-    success_count = 0
-    first_post_done = False
+    first_post = True
+    success = 0
 
     for job in today_jobs:
-        job_id = str(job['id'])
-        if job_id in posted_jobs:
-            # print(f"Skipping duplicate: {job_id}")
+        if job['id'] in posted_jobs:
             continue
 
-        # Delay logic: Wait BEFORE posting if NOT the first
-        if first_post_done:
+        if not first_post:
             print("Waiting 5 minutes before next post...")
             time.sleep(300)
 
-        print(f"\nPosting Job: {job['title']}")
-        
         caption = format_caption(job)
-        
-        # --- IMAGE GENERATION SKIPPED FOR TEXT-ONLY POST ---
-        # with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-        #     image_path = tmp.name
-        # create_job_image(job, image_path)
-        
-        # Pass image_path=None to force text-only tweet
+
         if post_to_x(caption, image_path=None):
-            save_posted_job(job_id) # Save to file
-            success_count += 1
-            print(f"✅ Posted Successfully (Text Only)!")
-            first_post_done = True
+            save_posted_job(job['id'])
+            success += 1
+            first_post = False
+            print("✅ Posted successfully (Text Only)")
         else:
-            print(f"❌ Failed to post.")
+            print("❌ Failed to post")
 
-        # try:
-        #     os.unlink(image_path)
-        # except:
-        #     pass
-
-    print(f"\nBatch completed. Posted {success_count} new jobs today.")
+    print(f"\nBatch completed. Posted {success} jobs today.")
 
 if __name__ == "__main__":
     main()
