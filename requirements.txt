@@ -2,3 +2,4 @@ tweepy
 requests
 python-dotenv
 matplotlib
+pytz==2025.1
